@@ -1,22 +1,26 @@
-"""Minimal example using synthetic data."""
+"""Пример работы алгоритма с синтетическими категориальными данными."""
 import numpy as np
 import pandas as pd
 
 from genrest.genetic_stratifier import GeneticStratifier
 
 
-def generate_data(n: int = 1000, seed: int = 0) -> pd.DataFrame:
+def generate_data(n: int = 200, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    x1 = rng.normal(0, 1, n)
-    x2 = rng.normal(5, 2, n)
-    y = x1 * 0.5 + x2 * 0.2 + rng.normal(0, 1, n)
-    return pd.DataFrame({"x1": x1, "x2": x2, "y": y})
+    colors = rng.choice(["red", "blue", "green"], size=n)
+    shapes = rng.choice(["circle", "square", "triangle"], size=n)
+    y = (
+        (colors == "red").astype(int)
+        + (shapes == "circle").astype(int)
+        + rng.normal(0, 1, n)
+    )
+    return pd.DataFrame({"color": colors, "shape": shapes, "y": y})
 
 
 def main() -> None:
     data = generate_data()
     stratifier = GeneticStratifier(
-        strat_columns=["x1", "x2"],
+        strat_columns=["color", "shape"],
         target_col="y",
         population_size=10,
         generations=5,

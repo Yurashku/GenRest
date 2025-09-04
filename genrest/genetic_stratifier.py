@@ -1,4 +1,4 @@
-"""Genetic algorithm for data stratification."""
+"""Генетический алгоритм для стратификации по категориальным признакам."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,27 +10,33 @@ import pandas as pd
 
 @dataclass
 class Stratification:
-    """Mapping from column name to sorted list of cut points."""
-    boundaries: Dict[str, List[float]]
+    """Отображение: столбец -> категория -> номер группы (0..2)."""
+    boundaries: Dict[str, Dict[str, int]]
 
 
 class GeneticStratifier:
-    """Genetic algorithm to minimize stratified variance of a target column.
+    """Минимизирует стратифицированную дисперсию целевой переменной.
+
+    Алгоритм принимает категориальные признаки и случайно разбивает значения
+    каждого признака на три группы. Группы по всем признакам комбинируются в
+    номер страты, после чего вычисляется взвешенная дисперсия целевой
+    переменной внутри страт. Генетический алгоритм эволюционирует разбиения,
+    чтобы минимизировать эту дисперсию.
 
     Parameters
     ----------
     strat_columns:
-        List of feature columns used to build stratification boundaries.
+        Список категориальных столбцов для стратификации.
     target_col:
-        Name of the target column for variance evaluation.
+        Название числового столбца с целевой переменной.
     population_size:
-        Number of individuals in each generation.
+        Размер популяции в каждом поколении.
     generations:
-        Number of generations to evolve.
+        Количество поколений эволюции.
     mutation_rate:
-        Probability of mutating a boundary in an individual.
+        Вероятность изменения группы у отдельной категории.
     random_state:
-        Seed for the internal random number generator.
+        Значение для воспроизводимости.
     """
 
     def __init__(
@@ -48,45 +54,40 @@ class GeneticStratifier:
         self.generations = generations
         self.mutation_rate = mutation_rate
         self._rng = np.random.default_rng(random_state)
-        self._ranges: Dict[str, tuple[float, float]] = {}
-        self.best_stratification_: Stratification | None = None
-        self.best_score_: float | None = None
+        self._categories: Dict[str, List[str]] = {}
 
     # ------------------------------------------------------------------
     def _random_stratification(self) -> Stratification:
-        boundaries: Dict[str, List[float]] = {}
+        boundaries: Dict[str, Dict[str, int]] = {}
         for col in self.strat_columns:
-            lo, hi = self._ranges[col]
-            pts = self._rng.uniform(lo, hi, size=2)
-            boundaries[col] = sorted(pts.tolist())
+            cats = self._categories[col]
+            boundaries[col] = {c: int(self._rng.integers(0, 3)) for c in cats}
         return Stratification(boundaries)
 
     def _mutate(self, strat: Stratification) -> Stratification:
-        boundaries = {}
-        for col, pts in strat.boundaries.items():
-            lo, hi = self._ranges[col]
-            new_pts = []
-            for p in pts:
+        boundaries: Dict[str, Dict[str, int]] = {}
+        for col, mapping in strat.boundaries.items():
+            new_map: Dict[str, int] = {}
+            for cat, grp in mapping.items():
                 if self._rng.random() < self.mutation_rate:
-                    span = hi - lo
-                    p = float(np.clip(p + self._rng.normal(scale=0.1 * span), lo, hi))
-                new_pts.append(p)
-            boundaries[col] = sorted(new_pts)
+                    grp = int(self._rng.integers(0, 3))
+                new_map[cat] = grp
+            boundaries[col] = new_map
         return Stratification(boundaries)
 
     def _crossover(self, a: Stratification, b: Stratification) -> Stratification:
         cut = self._rng.integers(1, len(self.strat_columns))
-        boundaries = {}
+        boundaries: Dict[str, Dict[str, int]] = {}
         for i, col in enumerate(self.strat_columns):
             parent = a if i < cut else b
-            boundaries[col] = parent.boundaries[col][:]
+            boundaries[col] = dict(parent.boundaries[col])
         return Stratification(boundaries)
 
     def _assign_strata(self, data: pd.DataFrame, strat: Stratification) -> np.ndarray:
         indices = np.zeros(len(data), dtype=int)
         for col in self.strat_columns:
-            bins = [-np.inf] + strat.boundaries[col] + [np.inf]
-            idx = np.digitize(data[col], bins) - 1
+            mapping = strat.boundaries[col]
+            idx = data[col].map(mapping).to_numpy()
             indices = indices * 3 + idx
         return indices
 
@@ -117,9 +118,10 @@ class GeneticStratifier:
 
     # ------------------------------------------------------------------
     def fit(self, data: pd.DataFrame) -> Stratification:
-        """Run the genetic algorithm and return the best stratification."""
-        self._ranges = {
-            col: (float(data[col].min()), float(data[col].max()))
+        """Запустить алгоритм и вернуть лучшую стратификацию."""
+        # собираем уникальные значения категориальных признаков
+        self._categories = {
+            col: sorted(map(str, data[col].astype(str).unique()))
             for col in self.strat_columns
         }
         population = [self._random_stratification() for _ in range(self.population_size)]
