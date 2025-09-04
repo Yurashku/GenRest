@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -57,7 +57,7 @@ class GeneticStratifier:
         generations: int = 50,
         mutation_rate: float = 0.1,
         n_groups: int = 3,
-        random_state: int | None = None,
+        random_state: Optional[int] = None,
     ) -> None:
         self.strat_columns = strat_columns
         self.target_col = target_col
