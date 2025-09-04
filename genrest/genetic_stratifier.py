@@ -1,4 +1,9 @@
-"""Генетический алгоритм для стратификации по категориальным признакам."""
+"""Генетический алгоритм для стратификации по категориальным признакам.
+
+Алгоритм работает только с категориальными признаками. Если исходные
+данные содержат числовые столбцы, преобразуйте их в категории с помощью
+`genrest.binning.bin_numeric`.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,11 +11,12 @@ from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 
 @dataclass
 class Stratification:
-    """Отображение: столбец -> категория -> номер группы (0..2)."""
+    """Отображение: столбец -> категория -> номер группы (0..n_groups-1)."""
     boundaries: Dict[str, Dict[str, int]]
 
 
@@ -18,8 +24,9 @@ class GeneticStratifier:
     """Минимизирует стратифицированную дисперсию целевой переменной.
 
     Алгоритм принимает категориальные признаки и случайно разбивает значения
-    каждого признака на три группы. Группы по всем признакам комбинируются в
-    номер страты, после чего вычисляется взвешенная дисперсия целевой
+    каждого признака на заданное число групп. Группы по всем признакам
+    комбинируются в номер страты, после чего вычисляется взвешенная дисперсия
+    целевой
     переменной внутри страт. Генетический алгоритм эволюционирует разбиения,
     чтобы минимизировать эту дисперсию.
 
@@ -35,6 +42,9 @@ class GeneticStratifier:
         Количество поколений эволюции.
     mutation_rate:
         Вероятность изменения группы у отдельной категории.
+    n_groups:
+        Количество групп для каждой категории. Итоговое число страт
+        равно ``n_groups ** len(strat_columns)``.
     random_state:
         Значение для воспроизводимости.
     """
@@ -46,6 +56,7 @@ class GeneticStratifier:
         population_size: int = 20,
         generations: int = 50,
         mutation_rate: float = 0.1,
+        n_groups: int = 3,
         random_state: int | None = None,
     ) -> None:
         self.strat_columns = strat_columns
@@ -53,6 +64,7 @@ class GeneticStratifier:
         self.population_size = population_size
         self.generations = generations
         self.mutation_rate = mutation_rate
+        self.n_groups = n_groups
         self._rng = np.random.default_rng(random_state)
         self._categories: Dict[str, List[str]] = {}
 
@@ -61,7 +73,9 @@ class GeneticStratifier:
         boundaries: Dict[str, Dict[str, int]] = {}
         for col in self.strat_columns:
             cats = self._categories[col]
-            boundaries[col] = {c: int(self._rng.integers(0, 3)) for c in cats}
+            boundaries[col] = {
+                c: int(self._rng.integers(0, self.n_groups)) for c in cats
+            }
         return Stratification(boundaries)
 
     def _mutate(self, strat: Stratification) -> Stratification:
@@ -70,7 +84,7 @@ class GeneticStratifier:
             new_map: Dict[str, int] = {}
             for cat, grp in mapping.items():
                 if self._rng.random() < self.mutation_rate:
-                    grp = int(self._rng.integers(0, 3))
+                    grp = int(self._rng.integers(0, self.n_groups))
                 new_map[cat] = grp
             boundaries[col] = new_map
         return Stratification(boundaries)
@@ -88,7 +102,7 @@ class GeneticStratifier:
         for col in self.strat_columns:
             mapping = strat.boundaries[col]
             idx = data[col].map(mapping).to_numpy()
-            indices = indices * 3 + idx
+            indices = indices * self.n_groups + idx
         return indices
 
     def _stratified_variance(self, data: pd.DataFrame, strat: Stratification) -> float:
@@ -118,7 +132,20 @@ class GeneticStratifier:
 
     # ------------------------------------------------------------------
     def fit(self, data: pd.DataFrame) -> Stratification:
-        """Запустить алгоритм и вернуть лучшую стратификацию."""
+        """Запустить алгоритм и вернуть лучшую стратификацию.
+
+        Перед запуском проверяется, что все `strat_columns` являются
+        категориальными. Если встречается числовой столбец, возбуждается
+        ``TypeError`` с рекомендацией воспользоваться функцией
+        ``bin_numeric``.
+        """
+        for col in self.strat_columns:
+            if is_numeric_dtype(data[col]):
+                raise TypeError(
+                    f"Колонка '{col}' числовая. Используйте bin_numeric() "
+                    "для преобразования в категории."
+                )
+
         # собираем уникальные значения категориальных признаков
         self._categories = {
             col: sorted(map(str, data[col].astype(str).unique()))
