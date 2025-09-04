@@ -55,8 +55,6 @@ class GeneticStratifier:
         self.mutation_rate = mutation_rate
         self._rng = np.random.default_rng(random_state)
         self._categories: Dict[str, List[str]] = {}
-        self.best_stratification_: Stratification | None = None
-        self.best_score_: float | None = None
 
     # ------------------------------------------------------------------
     def _random_stratification(self) -> Stratification:
