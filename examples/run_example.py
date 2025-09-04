@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 
-from genrest import GeneticStratifier, bin_numeric
+from genrest import GeneticStratifier, bin_numeric, stratify_with_inheritance
 
 
 def generate_data(n: int = 200, seed: int = 0) -> pd.DataFrame:
@@ -34,6 +34,19 @@ def main() -> None:
     best = stratifier.fit(data)
     print("Best stratification:", best)
     print("Best score:", stratifier.best_score_)
+
+    # пример с обязательной колонкой color
+    strata = stratify_with_inheritance(
+        data,
+        strat_columns=["color", "shape", "age"],
+        target_col="y",
+        mandatory_columns=["color"],
+        n_groups=2,
+        generations=5,
+        population_size=10,
+        random_state=0,
+    )
+    print("With inheritance (first 10):", strata[:10])
 
 
 if __name__ == "__main__":

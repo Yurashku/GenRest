@@ -17,6 +17,27 @@
 Параметр `n_groups` управляет финальным числом страт: при двух признаках и
 `n_groups=3` получится `3^2=9` страт, при `n_groups=2` — `4` и т.д.
 
+### Наследуемые признаки
+
+Если нужно сохранить отдельные значения признаков (например, не смешивать
+мужчин и женщин), используйте функцию `stratify_with_inheritance`. Она запускает
+генетический алгоритм отдельно внутри каждой комбинации обязательных колонок.
+
+```python
+from genrest import stratify_with_inheritance
+
+strata = stratify_with_inheritance(
+    data,
+    strat_columns=["color", "shape", "age"],
+    target_col="y",
+    mandatory_columns=["color"],  # раздельно для каждого цвета
+    n_groups=2,
+    generations=5,
+    population_size=10,
+)
+data["strata"] = strata
+```
+
 ## Установка
 ```bash
 python3.8 -m venv .venv

@@ -161,4 +161,46 @@ class GeneticStratifier:
         return population[best_idx]
 
 
-__all__ = ["GeneticStratifier", "Stratification"]
+def stratify_with_inheritance(
+    data: pd.DataFrame,
+    strat_columns: List[str],
+    target_col: str,
+    mandatory_columns: List[str],
+    *,
+    population_size: int = 20,
+    generations: int = 50,
+    mutation_rate: float = 0.1,
+    n_groups: int = 3,
+    random_state: Optional[int] = None,
+) -> np.ndarray:
+    """Стратифицировать данные с сохранением обязательных колонок.
+
+    Для каждой комбинации ``mandatory_columns`` генетический алгоритм
+    запускается отдельно на остальных колонках.
+    """
+    optional_cols = [c for c in strat_columns if c not in mandatory_columns]
+    if not optional_cols:
+        raise ValueError(
+            "Не осталось колонок для объединения после учета обязательных."
+        )
+
+    strata = np.zeros(len(data), dtype=int)
+    offset = 0
+    for _, grp in data.groupby(mandatory_columns):
+        strat = GeneticStratifier(
+            strat_columns=optional_cols,
+            target_col=target_col,
+            population_size=population_size,
+            generations=generations,
+            mutation_rate=mutation_rate,
+            n_groups=n_groups,
+            random_state=random_state,
+        )
+        best = strat.fit(grp)
+        local = strat._assign_strata(grp, best)
+        strata[grp.index] = offset + local
+        offset += n_groups ** len(optional_cols)
+    return strata
+
+
+__all__ = ["GeneticStratifier", "Stratification", "stratify_with_inheritance"]
