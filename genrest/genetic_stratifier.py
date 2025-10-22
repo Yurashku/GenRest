@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -19,6 +19,21 @@ from pandas.api.types import is_numeric_dtype
 class Stratification:
     """Отображение: столбец -> категория -> номер группы."""
     boundaries: Dict[str, Dict[str, int]]
+
+
+def _weighted_stratified_variance(
+    values: pd.Series, groups: Iterable
+) -> float:
+    """Посчитать взвешенную дисперсию внутри страт."""
+
+    grouped = values.groupby(groups)
+    total = len(values)
+    var = 0.0
+    for _, grp in grouped:
+        if len(grp) > 1:
+            w = len(grp) / total
+            var += w * w * grp.var(ddof=1)
+    return float(var)
 
 
 class GeneticStratifier:
@@ -197,14 +212,7 @@ class GeneticStratifier:
 
     def _stratified_variance(self, data: pd.DataFrame, strat: Stratification) -> float:
         idx = self._assign_strata(data, strat)
-        grouped = data.groupby(idx)[self.target_col]
-        total = len(data)
-        var = 0.0
-        for _, grp in grouped:
-            if len(grp) > 1:
-                w = len(grp) / total
-                var += w * w * grp.var(ddof=1)
-        return float(var)
+        return _weighted_stratified_variance(data[self.target_col], idx)
 
     def _next_generation(
         self, data: pd.DataFrame, population: List[Stratification]
@@ -272,11 +280,48 @@ class GeneticStratifier:
         if not hasattr(self, "best_stratification_"):
             raise AttributeError("Сначала вызовите fit().")
 
+        if self.target_col not in data.columns:
+            raise KeyError(
+                "Для расчёта метрик в transform требуется колонка с целевой переменной."
+            )
+
         _, labels = self._encode_with_labels(data, self.best_stratification_)
         result = data.copy()
         result[column_name] = labels
         if drop_original:
             result = result.drop(columns=[c for c in self.strat_columns if c in result])
+
+        target = data[self.target_col]
+        overall_var = float(target.var(ddof=1))
+        original_groups = data[self.strat_columns].astype(str)
+        baseline_labels = original_groups.agg("|".join, axis=1)
+        baseline_var = _weighted_stratified_variance(target, baseline_labels)
+        new_indices = self._assign_strata(data, self.best_stratification_)
+        new_var = _weighted_stratified_variance(target, new_indices)
+
+        if baseline_var > 0:
+            change_pct = (baseline_var - new_var) / baseline_var * 100
+            if change_pct >= 0:
+                reduction_text = f"ниже на {change_pct:.2f}%"
+            else:
+                reduction_text = f"выше на {abs(change_pct):.2f}%"
+        else:
+            reduction_text = "недоступно (исходная дисперсия равна 0)"
+
+        print("\nРезультаты трансформации:")
+        print(f"  Цельная дисперсия: {overall_var:.6f}")
+        print(
+            "  Стратифицированная дисперсия по исходным комбинациям: "
+            f"{baseline_var:.6f}"
+        )
+        print(
+            "  Стратифицированная дисперсия после объединения категорий: "
+            f"{new_var:.6f}"
+        )
+        print(
+            "  Стратифицированная дисперсия по сравнению с исходной: "
+            f"{reduction_text}"
+        )
         return result
 
 
@@ -355,8 +400,14 @@ def _stratify_with_inheritance_transform(
             "Не осталось колонок для объединения после учета обязательных."
         )
 
+    if target_col not in data.columns:
+        raise KeyError(
+            "Для расчёта метрик в transform требуется колонка с целевой переменной."
+        )
+
     result = data.copy()
     labels = pd.Series(index=data.index, dtype=object)
+    new_indices = pd.Series(index=data.index, dtype=int)
     offset = 0
 
     for key, grp in data.groupby(mandatory_columns, sort=False):
@@ -371,6 +422,7 @@ def _stratify_with_inheritance_transform(
             random_state=random_state,
         )
         best = strat.fit(grp)
+        local_indices = strat._assign_strata(grp, best)
         _, local_labels = strat._encode_with_labels(grp, best, offset=offset)
 
         if mandatory_columns:
@@ -388,12 +440,43 @@ def _stratify_with_inheritance_transform(
             )
 
         labels.loc[grp.index] = local_labels
+        new_indices.loc[grp.index] = offset + local_indices
         offset += prod(strat._group_counts)
 
     result[column_name] = labels
     if drop_original:
         drop_cols = [c for c in strat_columns if c in result.columns]
         result = result.drop(columns=drop_cols)
+
+    target = data[target_col]
+    overall_var = float(target.var(ddof=1))
+    baseline_labels = data[strat_columns].astype(str).agg("|".join, axis=1)
+    baseline_var = _weighted_stratified_variance(target, baseline_labels)
+    new_var = _weighted_stratified_variance(target, new_indices)
+
+    if baseline_var > 0:
+        change_pct = (baseline_var - new_var) / baseline_var * 100
+        if change_pct >= 0:
+            reduction_text = f"ниже на {change_pct:.2f}%"
+        else:
+            reduction_text = f"выше на {abs(change_pct):.2f}%"
+    else:
+        reduction_text = "недоступно (исходная дисперсия равна 0)"
+
+    print("\nРезультаты трансформации с обязательными колонками:")
+    print(f"  Цельная дисперсия: {overall_var:.6f}")
+    print(
+        "  Стратифицированная дисперсия по исходным комбинациям: "
+        f"{baseline_var:.6f}"
+    )
+    print(
+        "  Стратифицированная дисперсия после объединения категорий: "
+        f"{new_var:.6f}"
+    )
+    print(
+        "  Стратифицированная дисперсия по сравнению с исходной: "
+        f"{reduction_text}"
+    )
     return result
 
 
