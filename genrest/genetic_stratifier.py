@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -117,6 +117,11 @@ class GeneticStratifier:
         return Stratification(boundaries)
 
     def _crossover(self, a: Stratification, b: Stratification) -> Stratification:
+        if len(self.strat_columns) == 1:
+            parent = a if self._rng.random() < 0.5 else b
+            col = self.strat_columns[0]
+            return Stratification({col: dict(parent.boundaries[col])})
+
         cut = self._rng.integers(1, len(self.strat_columns))
         boundaries: Dict[str, Dict[str, int]] = {}
         for i, col in enumerate(self.strat_columns):
@@ -128,9 +133,67 @@ class GeneticStratifier:
         indices = np.zeros(len(data), dtype=int)
         for col, base in zip(self.strat_columns, self._group_counts):
             mapping = strat.boundaries[col]
-            idx = data[col].map(mapping).to_numpy()
+            series = data[col].astype(str)
+            mapped = series.map(mapping)
+            if mapped.isnull().any():
+                missing = sorted(series[mapped.isnull()].unique())
+                raise KeyError(
+                    "Для колонки "
+                    f"'{col}' найдены неизвестные категории: {missing}."
+                )
+            idx = mapped.to_numpy(dtype=int)
             indices = indices * base + idx
         return indices
+
+    def _encode_with_labels(
+        self,
+        data: pd.DataFrame,
+        strat: Stratification,
+        *,
+        offset: int = 0,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Вернуть глобальные индексы страт и их строковые описания."""
+
+        if len(self.strat_columns) == 0:
+            raise ValueError("Не указаны стратифицируемые колонки.")
+
+        inverted: Dict[str, Dict[int, List[str]]] = {}
+        encoded_columns: List[np.ndarray] = []
+        for col in self.strat_columns:
+            mapping = strat.boundaries[col]
+            inverse: Dict[int, List[str]] = {}
+            for category, group_id in mapping.items():
+                inverse.setdefault(group_id, []).append(str(category))
+            inverted[col] = {k: sorted(v) for k, v in inverse.items()}
+
+            series = data[col].astype(str)
+            encoded = series.map(mapping)
+            if encoded.isnull().any():
+                missing = sorted(series[encoded.isnull()].unique())
+                raise KeyError(
+                    "Для колонки "
+                    f"'{col}' найдены неизвестные категории: {missing}."
+                )
+            encoded_columns.append(encoded.to_numpy(dtype=int))
+
+        group_matrix = np.column_stack(encoded_columns)
+        local_indices = np.zeros(len(data), dtype=int)
+        for encoded, base in zip(encoded_columns, self._group_counts):
+            local_indices = local_indices * base + encoded
+
+        labels = np.empty(len(data), dtype=object)
+        cache: Dict[Tuple[int, ...], str] = {}
+        for i, (local_idx, combo) in enumerate(zip(local_indices, group_matrix)):
+            combo_tuple = tuple(int(v) for v in combo)
+            if combo_tuple not in cache:
+                parts = []
+                for col, grp in zip(self.strat_columns, combo_tuple):
+                    cats = ", ".join(inverted[col][grp])
+                    parts.append(f"{col}={{{cats}}}")
+                strata_id = offset + int(local_idx)
+                cache[combo_tuple] = f"strata_{strata_id}: " + "; ".join(parts)
+            labels[i] = cache[combo_tuple]
+        return local_indices + offset, labels
 
     def _stratified_variance(self, data: pd.DataFrame, strat: Stratification) -> float:
         idx = self._assign_strata(data, strat)
@@ -187,6 +250,35 @@ class GeneticStratifier:
         self.best_score_ = scores[best_idx]
         return population[best_idx]
 
+    def transform(
+        self,
+        data: pd.DataFrame,
+        *,
+        column_name: str = "strata_label",
+        drop_original: bool = True,
+    ) -> pd.DataFrame:
+        """Заменить категориальные колонки новой с описаниями страт.
+
+        Parameters
+        ----------
+        data:
+            Таблица с исходными признаками, совместимыми с обучением.
+        column_name:
+            Название новой колонки с текстовым описанием страты.
+        drop_original:
+            Удалять ли исходные ``strat_columns`` из результата.
+        """
+
+        if not hasattr(self, "best_stratification_"):
+            raise AttributeError("Сначала вызовите fit().")
+
+        _, labels = self._encode_with_labels(data, self.best_stratification_)
+        result = data.copy()
+        result[column_name] = labels
+        if drop_original:
+            result = result.drop(columns=[c for c in self.strat_columns if c in result])
+        return result
+
 
 def stratify_with_inheritance(
     data: pd.DataFrame,
@@ -217,7 +309,7 @@ def stratify_with_inheritance(
 
     strata = np.zeros(len(data), dtype=int)
     offset = 0
-    for _, grp in data.groupby(mandatory_columns):
+    for _, grp in data.groupby(mandatory_columns, sort=False):
         strat = GeneticStratifier(
             strat_columns=optional_cols,
             target_col=target_col,
@@ -233,6 +325,79 @@ def stratify_with_inheritance(
         strata[grp.index] = offset + local
         offset += prod(strat._group_counts)
     return strata
+
+
+def _stratify_with_inheritance_transform(
+    data: pd.DataFrame,
+    strat_columns: List[str],
+    target_col: str,
+    mandatory_columns: List[str],
+    *,
+    column_name: str = "strata_label",
+    drop_original: bool = True,
+    population_size: int = 20,
+    generations: int = 50,
+    mutation_rate: float = 0.1,
+    n_groups: int = 3,
+    total_strata: Optional[int] = None,
+    random_state: Optional[int] = None,
+) -> pd.DataFrame:
+    """Стратифицировать данные и заменить признаки описанием страты.
+
+    Параметр ``drop_original`` управляет удалением исходных колонок из
+    возвращаемого датафрейма. Название новой колонки задаётся через
+    ``column_name``.
+    """
+
+    optional_cols = [c for c in strat_columns if c not in mandatory_columns]
+    if not optional_cols:
+        raise ValueError(
+            "Не осталось колонок для объединения после учета обязательных."
+        )
+
+    result = data.copy()
+    labels = pd.Series(index=data.index, dtype=object)
+    offset = 0
+
+    for key, grp in data.groupby(mandatory_columns, sort=False):
+        strat = GeneticStratifier(
+            strat_columns=optional_cols,
+            target_col=target_col,
+            population_size=population_size,
+            generations=generations,
+            mutation_rate=mutation_rate,
+            n_groups=n_groups,
+            total_strata=total_strata,
+            random_state=random_state,
+        )
+        best = strat.fit(grp)
+        _, local_labels = strat._encode_with_labels(grp, best, offset=offset)
+
+        if mandatory_columns:
+            if not isinstance(key, tuple):
+                key_values = (key,)
+            else:
+                key_values = key
+            prefix_parts = [
+                f"{col}={str(value)}"
+                for col, value in zip(mandatory_columns, key_values)
+            ]
+            local_labels = np.array(
+                [f"{'; '.join(prefix_parts)}; {lbl}" for lbl in local_labels],
+                dtype=object,
+            )
+
+        labels.loc[grp.index] = local_labels
+        offset += prod(strat._group_counts)
+
+    result[column_name] = labels
+    if drop_original:
+        drop_cols = [c for c in strat_columns if c in result.columns]
+        result = result.drop(columns=drop_cols)
+    return result
+
+
+stratify_with_inheritance.transform = _stratify_with_inheritance_transform
 
 
 __all__ = ["GeneticStratifier", "Stratification", "stratify_with_inheritance"]
