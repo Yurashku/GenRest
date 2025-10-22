@@ -34,6 +34,8 @@ def main() -> None:
     best = stratifier.fit(data)
     print("Best stratification:", best)
     print("Best score:", stratifier.best_score_)
+    transformed = stratifier.transform(data, column_name="strata")
+    print("Transformed head:\n", transformed.head())
 
     # пример с обязательной колонкой color
     strata = stratify_with_inheritance(
@@ -47,6 +49,17 @@ def main() -> None:
         random_state=0,
     )
     print("With inheritance (first 10):", strata[:10])
+    inherited = stratify_with_inheritance.transform(
+        data,
+        strat_columns=["color", "shape", "age"],
+        target_col="y",
+        mandatory_columns=["color"],
+        n_groups=2,
+        generations=5,
+        population_size=10,
+        random_state=0,
+    )
+    print("Transformed with inheritance head:\n", inherited.head())
 
 
 if __name__ == "__main__":
