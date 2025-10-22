@@ -86,6 +86,29 @@ stratifier = GeneticStratifier(
 best = stratifier.fit(data)
 print(best)
 print("score:", stratifier.best_score_)
+
+# преобразуем категории в информативную метку страты
+stratified = stratifier.transform(data, column_name="strata")
+print(stratified.head())
 ```
 
 Более развёрнутый пример см. в [examples/tutorial.ipynb](examples/tutorial.ipynb).
+
+Чтобы при этом учитывать обязательные признаки, которые нельзя объединять
+между собой, используйте метод ``transform`` у функции
+``stratify_with_inheritance``:
+
+```python
+from genrest import stratify_with_inheritance
+
+collapsed = stratify_with_inheritance.transform(
+    data,
+    strat_columns=["color", "shape", "age"],
+    target_col="y",
+    mandatory_columns=["color"],
+    n_groups=2,
+    generations=5,
+    population_size=10,
+)
+print(collapsed.head())
+```
