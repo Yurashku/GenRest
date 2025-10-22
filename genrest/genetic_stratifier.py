@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import warnings
+
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -36,7 +38,7 @@ def _weighted_stratified_variance(
     return float(var)
 
 
-class GeneticStratifier:
+class GeneticStratificationAlgorithm:
     """Минимизирует стратифицированную дисперсию целевой переменной.
 
     Алгоритм принимает категориальные признаки и случайно разбивает значения
@@ -325,6 +327,234 @@ class GeneticStratifier:
         return result
 
 
+class InheritedGeneticStratificationAlgorithm:
+    """Комбинирует стратификацию с обязательными колонками.
+
+    Для каждой комбинации ``mandatory_columns`` запускается отдельный
+    :class:`GeneticStratificationAlgorithm`. Полученные страты объединяются в
+    единую нумерацию, поэтому алгоритмы можно взаимозаменяемо подключать в
+    пайплайн.
+    """
+
+    def __init__(
+        self,
+        strat_columns: List[str],
+        target_col: str,
+        mandatory_columns: List[str],
+        *,
+        population_size: int = 20,
+        generations: int = 50,
+        mutation_rate: float = 0.1,
+        n_groups: int = 3,
+        total_strata: Optional[int] = None,
+        random_state: Optional[int] = None,
+    ) -> None:
+        self.strat_columns = strat_columns
+        self.target_col = target_col
+        self.mandatory_columns = mandatory_columns
+        self.population_size = population_size
+        self.generations = generations
+        self.mutation_rate = mutation_rate
+        self.n_groups = n_groups
+        self.total_strata = total_strata
+        self.random_state = random_state
+
+        self._optional_cols = [c for c in strat_columns if c not in mandatory_columns]
+        if not self._optional_cols:
+            raise ValueError(
+                "Не осталось колонок для объединения после учета обязательных."
+            )
+
+        self._fitted_algorithms: Dict[Tuple[object, ...], Tuple[
+            GeneticStratificationAlgorithm,
+            Stratification,
+        ]] = {}
+        self._offsets: Dict[Tuple[object, ...], int] = {}
+
+    # ------------------------------------------------------------------
+    def _normalize_key(self, key: object) -> Tuple[object, ...]:
+        if not self.mandatory_columns:
+            return ()
+        if len(self.mandatory_columns) == 1 and not isinstance(key, tuple):
+            return (key,)
+        if isinstance(key, tuple):
+            return key
+        return (key,)
+
+    def _require_fitted(self) -> None:
+        if not self._fitted_algorithms:
+            raise AttributeError("Сначала вызовите fit().")
+
+    def fit(self, data: pd.DataFrame) -> "InheritedGeneticStratificationAlgorithm":
+        """Подобрать страты с учётом обязательных колонок."""
+
+        if self.target_col not in data.columns:
+            raise KeyError(
+                "Для обучения требуется колонка с целевой переменной."
+            )
+
+        self._fitted_algorithms.clear()
+        self._offsets.clear()
+
+        offset = 0
+        if self.mandatory_columns:
+            iterator = data.groupby(self.mandatory_columns, sort=False)
+        else:
+            iterator = [((), data)]
+
+        for key, grp in iterator:
+            algo = GeneticStratificationAlgorithm(
+                strat_columns=self._optional_cols,
+                target_col=self.target_col,
+                population_size=self.population_size,
+                generations=self.generations,
+                mutation_rate=self.mutation_rate,
+                n_groups=self.n_groups,
+                total_strata=self.total_strata,
+                random_state=self.random_state,
+            )
+            best = algo.fit(grp)
+            key_tuple = self._normalize_key(key)
+            self._fitted_algorithms[key_tuple] = (algo, best)
+            self._offsets[key_tuple] = offset
+            group_size = prod(algo._group_counts)
+            offset += group_size
+
+        self.total_strata_ = offset
+        self.strata_ = self.transform_to_indices(data)
+        return self
+
+    def transform_to_indices(self, data: pd.DataFrame) -> np.ndarray:
+        """Получить числовые индексы страт для каждой строки."""
+
+        self._require_fitted()
+        strata = np.zeros(len(data), dtype=int)
+
+        if self.mandatory_columns:
+            iterator = data.groupby(self.mandatory_columns, sort=False)
+        else:
+            iterator = [((), data)]
+
+        for key, grp in iterator:
+            key_tuple = self._normalize_key(key)
+            if key_tuple not in self._fitted_algorithms:
+                raise KeyError(
+                    "Обнаружена новая комбинация обязательных колонок, "
+                    "которой не было при fit()."
+                )
+            algo, strat = self._fitted_algorithms[key_tuple]
+            offset = self._offsets[key_tuple]
+            local = algo._assign_strata(grp, strat)
+            strata[grp.index] = offset + local
+
+        return strata
+
+    def transform(
+        self,
+        data: pd.DataFrame,
+        *,
+        column_name: str = "strata_label",
+        drop_original: bool = True,
+    ) -> pd.DataFrame:
+        """Добавить колонку с описанием страт и вывести метрики."""
+
+        self._require_fitted()
+
+        if self.target_col not in data.columns:
+            raise KeyError(
+                "Для расчёта метрик в transform требуется колонка с целевой переменной."
+            )
+
+        result = data.copy()
+        labels = pd.Series(index=data.index, dtype=object)
+        new_indices = pd.Series(index=data.index, dtype=int)
+
+        if self.mandatory_columns:
+            iterator = data.groupby(self.mandatory_columns, sort=False)
+        else:
+            iterator = [((), data)]
+
+        for key, grp in iterator:
+            key_tuple = self._normalize_key(key)
+            if key_tuple not in self._fitted_algorithms:
+                raise KeyError(
+                    "Обнаружена новая комбинация обязательных колонок, "
+                    "которой не было при fit()."
+                )
+            algo, strat = self._fitted_algorithms[key_tuple]
+            offset = self._offsets[key_tuple]
+            local_indices = algo._assign_strata(grp, strat)
+            _, local_labels = algo._encode_with_labels(grp, strat, offset=offset)
+
+            if self.mandatory_columns:
+                if not isinstance(key, tuple):
+                    key_values = (key,)
+                else:
+                    key_values = key
+                prefix_parts = [
+                    f"{col}={str(value)}"
+                    for col, value in zip(self.mandatory_columns, key_values)
+                ]
+                local_labels = np.array(
+                    [f"{'; '.join(prefix_parts)}; {lbl}" for lbl in local_labels],
+                    dtype=object,
+                )
+
+            labels.loc[grp.index] = local_labels
+            new_indices.loc[grp.index] = offset + local_indices
+
+        result[column_name] = labels
+        if drop_original:
+            drop_cols = [c for c in self.strat_columns if c in result.columns]
+            result = result.drop(columns=drop_cols)
+
+        target = data[self.target_col]
+        overall_var = float(target.var(ddof=1))
+        baseline_labels = data[self.strat_columns].astype(str).agg("|".join, axis=1)
+        baseline_var = _weighted_stratified_variance(target, baseline_labels)
+        new_var = _weighted_stratified_variance(target, new_indices)
+
+        if baseline_var > 0:
+            change_pct = (baseline_var - new_var) / baseline_var * 100
+            if change_pct >= 0:
+                reduction_text = f"ниже на {change_pct:.2f}%"
+            else:
+                reduction_text = f"выше на {abs(change_pct):.2f}%"
+        else:
+            reduction_text = "недоступно (исходная дисперсия равна 0)"
+
+        print("\nРезультаты трансформации с обязательными колонками:")
+        print(f"  Цельная дисперсия: {overall_var:.6f}")
+        print(
+            "  Стратифицированная дисперсия по исходным комбинациям: "
+            f"{baseline_var:.6f}"
+        )
+        print(
+            "  Стратифицированная дисперсия после объединения категорий: "
+            f"{new_var:.6f}"
+        )
+        print(
+            "  Стратифицированная дисперсия по сравнению с исходной: "
+            f"{reduction_text}"
+        )
+        return result
+
+    def fit_transform(
+        self,
+        data: pd.DataFrame,
+        *,
+        column_name: str = "strata_label",
+        drop_original: bool = True,
+    ) -> pd.DataFrame:
+        """Удобный шорткат, объединяющий ``fit`` и ``transform``."""
+
+        return self.fit(data).transform(
+            data,
+            column_name=column_name,
+            drop_original=drop_original,
+        )
+
+
 def stratify_with_inheritance(
     data: pd.DataFrame,
     strat_columns: List[str],
@@ -338,38 +568,32 @@ def stratify_with_inheritance(
     total_strata: Optional[int] = None,
     random_state: Optional[int] = None,
 ) -> np.ndarray:
-    """Стратифицировать данные с сохранением обязательных колонок.
+    """Совместимый интерфейс со старым API.
 
-    Для каждой комбинации ``mandatory_columns`` генетический алгоритм
-    запускается отдельно на остальных колонках.
-
-    Параметр ``total_strata`` задаёт общее число страт для объединяемых
-    колонок. Если он не указан, используется ``n_groups`` для каждого столбца.
+    Функция обёртка вызывает :class:`InheritedGeneticStratificationAlgorithm`.
+    Используйте класс напрямую для замены и комбинирования алгоритмов.
     """
-    optional_cols = [c for c in strat_columns if c not in mandatory_columns]
-    if not optional_cols:
-        raise ValueError(
-            "Не осталось колонок для объединения после учета обязательных."
-        )
 
-    strata = np.zeros(len(data), dtype=int)
-    offset = 0
-    for _, grp in data.groupby(mandatory_columns, sort=False):
-        strat = GeneticStratifier(
-            strat_columns=optional_cols,
-            target_col=target_col,
-            population_size=population_size,
-            generations=generations,
-            mutation_rate=mutation_rate,
-            n_groups=n_groups,
-            total_strata=total_strata,
-            random_state=random_state,
-        )
-        best = strat.fit(grp)
-        local = strat._assign_strata(grp, best)
-        strata[grp.index] = offset + local
-        offset += prod(strat._group_counts)
-    return strata
+    warnings.warn(
+        "stratify_with_inheritance() устарела. Используйте "
+        "InheritedGeneticStratificationAlgorithm.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    algorithm = InheritedGeneticStratificationAlgorithm(
+        strat_columns=strat_columns,
+        target_col=target_col,
+        mandatory_columns=mandatory_columns,
+        population_size=population_size,
+        generations=generations,
+        mutation_rate=mutation_rate,
+        n_groups=n_groups,
+        total_strata=total_strata,
+        random_state=random_state,
+    )
+    algorithm.fit(data)
+    return algorithm.transform_to_indices(data)
 
 
 def _stratify_with_inheritance_transform(
@@ -387,100 +611,41 @@ def _stratify_with_inheritance_transform(
     total_strata: Optional[int] = None,
     random_state: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Стратифицировать данные и заменить признаки описанием страты.
-
-    Параметр ``drop_original`` управляет удалением исходных колонок из
-    возвращаемого датафрейма. Название новой колонки задаётся через
-    ``column_name``.
-    """
-
-    optional_cols = [c for c in strat_columns if c not in mandatory_columns]
-    if not optional_cols:
-        raise ValueError(
-            "Не осталось колонок для объединения после учета обязательных."
-        )
-
-    if target_col not in data.columns:
-        raise KeyError(
-            "Для расчёта метрик в transform требуется колонка с целевой переменной."
-        )
-
-    result = data.copy()
-    labels = pd.Series(index=data.index, dtype=object)
-    new_indices = pd.Series(index=data.index, dtype=int)
-    offset = 0
-
-    for key, grp in data.groupby(mandatory_columns, sort=False):
-        strat = GeneticStratifier(
-            strat_columns=optional_cols,
-            target_col=target_col,
-            population_size=population_size,
-            generations=generations,
-            mutation_rate=mutation_rate,
-            n_groups=n_groups,
-            total_strata=total_strata,
-            random_state=random_state,
-        )
-        best = strat.fit(grp)
-        local_indices = strat._assign_strata(grp, best)
-        _, local_labels = strat._encode_with_labels(grp, best, offset=offset)
-
-        if mandatory_columns:
-            if not isinstance(key, tuple):
-                key_values = (key,)
-            else:
-                key_values = key
-            prefix_parts = [
-                f"{col}={str(value)}"
-                for col, value in zip(mandatory_columns, key_values)
-            ]
-            local_labels = np.array(
-                [f"{'; '.join(prefix_parts)}; {lbl}" for lbl in local_labels],
-                dtype=object,
-            )
-
-        labels.loc[grp.index] = local_labels
-        new_indices.loc[grp.index] = offset + local_indices
-        offset += prod(strat._group_counts)
-
-    result[column_name] = labels
-    if drop_original:
-        drop_cols = [c for c in strat_columns if c in result.columns]
-        result = result.drop(columns=drop_cols)
-
-    target = data[target_col]
-    overall_var = float(target.var(ddof=1))
-    baseline_labels = data[strat_columns].astype(str).agg("|".join, axis=1)
-    baseline_var = _weighted_stratified_variance(target, baseline_labels)
-    new_var = _weighted_stratified_variance(target, new_indices)
-
-    if baseline_var > 0:
-        change_pct = (baseline_var - new_var) / baseline_var * 100
-        if change_pct >= 0:
-            reduction_text = f"ниже на {change_pct:.2f}%"
-        else:
-            reduction_text = f"выше на {abs(change_pct):.2f}%"
-    else:
-        reduction_text = "недоступно (исходная дисперсия равна 0)"
-
-    print("\nРезультаты трансформации с обязательными колонками:")
-    print(f"  Цельная дисперсия: {overall_var:.6f}")
-    print(
-        "  Стратифицированная дисперсия по исходным комбинациям: "
-        f"{baseline_var:.6f}"
+    warnings.warn(
+        "stratify_with_inheritance.transform() устарела. Используйте "
+        "InheritedGeneticStratificationAlgorithm.",
+        DeprecationWarning,
+        stacklevel=2,
     )
-    print(
-        "  Стратифицированная дисперсия после объединения категорий: "
-        f"{new_var:.6f}"
+
+    algorithm = InheritedGeneticStratificationAlgorithm(
+        strat_columns=strat_columns,
+        target_col=target_col,
+        mandatory_columns=mandatory_columns,
+        population_size=population_size,
+        generations=generations,
+        mutation_rate=mutation_rate,
+        n_groups=n_groups,
+        total_strata=total_strata,
+        random_state=random_state,
     )
-    print(
-        "  Стратифицированная дисперсия по сравнению с исходной: "
-        f"{reduction_text}"
+    algorithm.fit(data)
+    return algorithm.transform(
+        data,
+        column_name=column_name,
+        drop_original=drop_original,
     )
-    return result
 
 
 stratify_with_inheritance.transform = _stratify_with_inheritance_transform
 
 
-__all__ = ["GeneticStratifier", "Stratification", "stratify_with_inheritance"]
+GeneticStratifier = GeneticStratificationAlgorithm
+
+
+__all__ = [
+    "GeneticStratificationAlgorithm",
+    "InheritedGeneticStratificationAlgorithm",
+    "Stratification",
+    "stratify_with_inheritance",
+]

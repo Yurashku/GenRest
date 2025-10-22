@@ -1,8 +1,12 @@
-"""Пример работы алгоритма на синтетических данных."""
+"""Пример работы алгоритмов стратификации на синтетических данных."""
 import numpy as np
 import pandas as pd
 
-from genrest import GeneticStratifier, bin_numeric, stratify_with_inheritance
+from genrest import (
+    GeneticStratificationAlgorithm,
+    InheritedGeneticStratificationAlgorithm,
+    bin_numeric,
+)
 
 
 def generate_data(n: int = 200, seed: int = 0) -> pd.DataFrame:
@@ -23,7 +27,7 @@ def main() -> None:
     data = generate_data()
     # преобразуем числовой признак age в категории
     bin_numeric(data, "age", bins=3)
-    stratifier = GeneticStratifier(
+    stratifier = GeneticStratificationAlgorithm(
         strat_columns=["color", "shape", "age"],
         target_col="y",
         population_size=10,
@@ -38,8 +42,7 @@ def main() -> None:
     print("Transformed head:\n", transformed.head())
 
     # пример с обязательной колонкой color
-    strata = stratify_with_inheritance(
-        data,
+    inherited_algo = InheritedGeneticStratificationAlgorithm(
         strat_columns=["color", "shape", "age"],
         target_col="y",
         mandatory_columns=["color"],
@@ -48,16 +51,13 @@ def main() -> None:
         population_size=10,
         random_state=0,
     )
+    inherited_algo.fit(data)
+    strata = inherited_algo.transform_to_indices(data)
     print("With inheritance (first 10):", strata[:10])
-    inherited = stratify_with_inheritance.transform(
+    inherited = inherited_algo.transform(
         data,
-        strat_columns=["color", "shape", "age"],
-        target_col="y",
-        mandatory_columns=["color"],
-        n_groups=2,
-        generations=5,
-        population_size=10,
-        random_state=0,
+        column_name="strata",
+        drop_original=False,
     )
     print("Transformed with inheritance head:\n", inherited.head())
 
