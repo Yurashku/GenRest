@@ -303,10 +303,18 @@ class GeneticStratificationAlgorithm:
 
         if baseline_var > 0:
             change_pct = (baseline_var - new_var) / baseline_var * 100
-            if change_pct >= 0:
-                reduction_text = f"ниже на {change_pct:.2f}%"
+            if change_pct > 0:
+                reduction_text = (
+                    "понижение на "
+                    f"{change_pct:.2f}% от исходной стратифицированной дисперсии"
+                )
+            elif change_pct < 0:
+                reduction_text = (
+                    "понижения нет (рост на "
+                    f"{abs(change_pct):.2f}% относительно исходной стратифицированной дисперсии)"
+                )
             else:
-                reduction_text = f"выше на {abs(change_pct):.2f}%"
+                reduction_text = "без изменений относительно исходной стратифицированной дисперсии"
         else:
             reduction_text = "недоступно (исходная дисперсия равна 0)"
 
@@ -516,10 +524,18 @@ class InheritedGeneticStratificationAlgorithm:
 
         if baseline_var > 0:
             change_pct = (baseline_var - new_var) / baseline_var * 100
-            if change_pct >= 0:
-                reduction_text = f"ниже на {change_pct:.2f}%"
+            if change_pct > 0:
+                reduction_text = (
+                    "понижение на "
+                    f"{change_pct:.2f}% от исходной стратифицированной дисперсии"
+                )
+            elif change_pct < 0:
+                reduction_text = (
+                    "понижения нет (рост на "
+                    f"{abs(change_pct):.2f}% относительно исходной стратифицированной дисперсии)"
+                )
             else:
-                reduction_text = f"выше на {abs(change_pct):.2f}%"
+                reduction_text = "без изменений относительно исходной стратифицированной дисперсии"
         else:
             reduction_text = "недоступно (исходная дисперсия равна 0)"
 
