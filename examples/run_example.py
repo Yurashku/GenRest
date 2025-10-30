@@ -1,6 +1,13 @@
 """Пример работы алгоритмов стратификации на синтетических данных."""
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from genrest import (
     GeneticStratificationAlgorithm,
@@ -9,29 +16,41 @@ from genrest import (
 )
 
 
-def generate_data(n: int = 200, seed: int = 0) -> pd.DataFrame:
+def generate_data(n: int = 600, seed: int = 0) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
-    colors = rng.choice(["red", "blue", "green"], size=n)
-    shapes = rng.choice(["circle", "square", "triangle"], size=n)
-    age = rng.normal(30, 10, size=n)
-    y = (
-        (colors == "red").astype(int)
-        + (shapes == "circle").astype(int)
-        + age / 10
-        + rng.normal(0, 1, n)
+    colors = rng.choice(["ruby", "amber", "teal"], size=n, p=[0.45, 0.35, 0.2])
+    shapes = rng.choice(["circle", "square", "triangle"], size=n, p=[0.4, 0.4, 0.2])
+    age = rng.normal(42, 11, size=n)
+
+    color_effect = np.select(
+        [colors == "ruby", colors == "amber"],
+        [4.5, 2.0],
+        default=-1.5,
     )
+    shape_effect = np.select(
+        [shapes == "circle", shapes == "square"],
+        [3.0, -0.5],
+        default=-2.0,
+    )
+    age_effect = np.select(
+        [age < 35, age < 45, age < 55],
+        [-1.0, 0.5, 2.0],
+        default=3.2,
+    )
+
+    y = color_effect + shape_effect + age_effect + rng.normal(0, 0.4, size=n)
     return pd.DataFrame({"color": colors, "shape": shapes, "age": age, "y": y})
 
 
 def main() -> None:
     data = generate_data()
     # преобразуем числовой признак age в категории
-    bin_numeric(data, "age", bins=3)
+    bin_numeric(data, "age", bins=4)
     stratifier = GeneticStratificationAlgorithm(
         strat_columns=["color", "shape", "age"],
         target_col="y",
-        population_size=10,
-        generations=5,
+        population_size=25,
+        generations=40,
         n_groups=2,
         random_state=0,
     )
@@ -47,8 +66,8 @@ def main() -> None:
         target_col="y",
         mandatory_columns=["color"],
         n_groups=2,
-        generations=5,
-        population_size=10,
+        generations=40,
+        population_size=25,
         random_state=0,
     )
     inherited_algo.fit(data)
